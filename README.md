@@ -8,7 +8,6 @@ SPDX-License-Identifier: Apache-2.0
 
 [![REUSE status](https://api.reuse.software/badge/github.com/rivosinc/prometheus-slurm-exporter)](https://api.reuse.software/info/github.com/rivosinc/prometheus-slurm-exporter)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rivosinc/prometheus-slurm-exporter)](https://goreportcard.com/report/github.com/rivosinc/prometheus-slurm-exporter)
-
 Inspired by the now unmaintained prometheus slurm [exporter](https://github.com/vpenso/prometheus-slurm-exporter). We implement in some form or another, most of the
 metrics from the previously maintained exporter. We have not yet added GPU or fairshare support, although we will be more than happy to accept contributions for those.
 This exporter supports `--json` output from cli. Note that the plugin supported is `openapi/v0.0.37` not `data_parser`, which ships with the most modern version of slurm.
