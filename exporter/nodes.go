@@ -315,6 +315,8 @@ type NodesCollector struct {
 	// exporter metrics
 	nodeScrapeDuration *prometheus.Desc
 	nodeScrapeErrors   prometheus.Counter
+	// Node Status metrics
+	nodeStatus    *prometheus.Desc
 }
 
 func NewNodeCollecter(config *Config) *NodesCollector {
@@ -355,6 +357,8 @@ func NewNodeCollecter(config *Config) *NodesCollector {
 		// exporter stats
 		nodeScrapeDuration: prometheus.NewDesc("slurm_node_scrape_duration", fmt.Sprintf("how long the cmd %v took (ms)", cliOpts.sinfo), nil, nil),
 		nodeScrapeErrors:   fetcher.ScrapeError(),
+		// Node Stats
+        	nodeStatus: prometheus.NewDesc("slurm_node_status", "Status of each node in the cluster", []string{"node", "state"}, nil),
 	}
 }
 
@@ -375,6 +379,7 @@ func (nc *NodesCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- nc.totalFreeMemory
 	ch <- nc.totalAllocMemory
 	ch <- nc.nodeScrapeDuration
+    	ch <- nc.nodeStatus
 	ch <- nc.nodeScrapeErrors.Desc()
 }
 
@@ -434,6 +439,16 @@ func (nc *NodesCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(nc.totalRealMemory, prometheus.GaugeValue, memMetrics.RealMemory)
 	ch <- prometheus.MustNewConstMetric(nc.totalFreeMemory, prometheus.GaugeValue, memMetrics.FreeMemory)
 	ch <- prometheus.MustNewConstMetric(nc.totalAllocMemory, prometheus.GaugeValue, memMetrics.AllocMemory)
+
+ 	   for _, node := range nodeMetrics {
+        	ch <- prometheus.MustNewConstMetric(
+            	nc.nodeStatus,             // Метрика nodeStatus
+            	prometheus.GaugeValue,      // Тип метрики
+            	1,                          // Значение метрики (фиксированное)
+            	node.Hostname,              // Лейбл node (имя ноды)
+            	node.State,                 // Лейбл state (статус ноды)
+        	)
+    	}
 }
 
 func (nc *NodesCollector) SetFetcher(fetcher SlurmMetricFetcher[NodeMetric]) {
