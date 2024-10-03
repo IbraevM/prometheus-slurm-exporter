@@ -301,6 +301,8 @@ type JobsCollector struct {
 	// exporter metrics
 	jobScrapeDuration *prometheus.Desc
 	jobScrapeError    prometheus.Counter
+	// Job States metrics
+	jobStatus *prometheus.Desc
 }
 
 func (jc *JobsCollector) SetFetcher(fetcher SlurmMetricFetcher[JobMetric]) {
@@ -327,6 +329,7 @@ func NewJobsController(config *Config) *JobsCollector {
 		featureJobCpuAlloc:      prometheus.NewDesc("slurm_feature_cpu_alloc", "alloc cpu consumed per feature", []string{"feature"}, nil),
 		featureJobTotal:         prometheus.NewDesc("slurm_feature_total", "alloc cpu consumed per feature", []string{"feature"}, nil),
 		jobScrapeDuration:       prometheus.NewDesc("slurm_job_scrape_duration", fmt.Sprintf("how long the cmd %v took (ms)", cliOpts.squeue), nil, nil),
+		jobStatus:                prometheus.NewDesc("slurm_job_status", "Job status with ID and name", []string{"job_id", "job_name", "state"}, nil),
 		jobScrapeError: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "slurm_job_scrape_error",
 			Help: "slurm job scrape error",
@@ -347,6 +350,7 @@ func (jc *JobsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- jc.featureJobMemAlloc
 	ch <- jc.featureJobCpuAlloc
 	ch <- jc.featureJobTotal
+	ch <- jc.jobStatus
 	ch <- jc.jobScrapeDuration
 	ch <- jc.jobScrapeError.Desc()
 }
@@ -413,5 +417,17 @@ func (jc *JobsCollector) Collect(ch chan<- prometheus.Metric) {
 		if metric.total > 0 {
 			ch <- prometheus.MustNewConstMetric(jc.featureJobTotal, prometheus.GaugeValue, metric.total, feature)
 		}
+	}
+
+	for _, job := range jobMetrics {
+		// Отправляем метрику для каждого Job'а
+		ch <- prometheus.MustNewConstMetric(
+			jc.jobStatus,
+			prometheus.GaugeValue,
+			1,                          // Значение фиксированное (просто наличие Job'а)
+			fmt.Sprintf("%.0f", job.JobId),  // Преобразуем JobId в строку
+			job.UserName,                // Имя Job'а (используем UserName в качестве имени Job)
+			job.JobState,                // Статус Job'а
+		)
 	}
 }
