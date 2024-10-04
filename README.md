@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ### UPDATED 03.10.2024 by Marsel Ibraev:
 
-Added two more metrics _slurm_node_state_ and _slurm_jobs_state_ to provide more information about node and job statuses.
+Added two more metrics _slurm_node_status_ and _slurm_jobs_status_ to provide more information about node and job statuses.
 
 # Slurm Exporter
 
