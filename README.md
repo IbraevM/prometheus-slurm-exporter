@@ -4,6 +4,10 @@ SPDX-FileCopyrightText: 2023 Rivos Inc.
 SPDX-License-Identifier: Apache-2.0
 -->
 
+### UPDATED 03.10.2024 by Marsel Ibraev:
+
+Added two more metrics _slurm_node_state_ and _slurm_jobs_state_ to provide more information about node and job statuses.
+
 # Slurm Exporter
 
 [![REUSE status](https://api.reuse.software/badge/github.com/rivosinc/prometheus-slurm-exporter)](https://api.reuse.software/info/github.com/rivosinc/prometheus-slurm-exporter)
