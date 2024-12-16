@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -23,9 +22,11 @@ type JobResource struct {
 	AllocCpus  float64                  `json:"allocated_cpus"`
 	AllocNodes map[string]*NodeResource `json:"allocated_nodes"`
 }
+
 type JobMetric struct {
 	Account      string      `json:"account"`
 	JobId        float64     `json:"job_id"`
+	ArrayId      string      `json:"array_id"` // New label for job array
 	EndTime      float64     `json:"end_time"`
 	JobState     string      `json:"job_state"`
 	Partition    string      `json:"partition"`
@@ -47,6 +48,34 @@ type squeueResponse struct {
 	} `json:"meta"`
 	Errors []string    `json:"errors"`
 	Jobs   []JobMetric `json:"jobs"`
+}
+
+type NAbleTime struct {
+	time.Time
+}
+
+// UnmarshalJSON handles special cases for N/A or NONE timestamps.
+func (nat *NAbleTime) UnmarshalJSON(data []byte) error {
+	var tString string
+	if err := json.Unmarshal(data, &tString); err != nil {
+		return err
+	}
+	nullSet := map[string]struct{}{"N/A": {}, "NONE": {}}
+	if _, ok := nullSet[tString]; ok {
+		nat.Time = time.Time{}
+		return nil
+	}
+	t, err := time.Parse("2006-01-02T15:04:05", tString)
+	nat.Time = t
+	return err
+}
+
+func totalAllocMem(resource *JobResource) float64 {
+	var allocMem float64
+	for _, node := range resource.AllocNodes {
+		allocMem += node.Mem
+	}
+	return allocMem
 }
 
 type JobJsonFetcher struct {
@@ -98,12 +127,15 @@ func (jcf *JobCliFallbackFetcher) fetch() ([]JobMetric, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	jobMetrics := make([]JobMetric, 0)
-	// clean input
+	seenJobs := make(map[float64]bool) // Map to track unique JobIds
+
+	// Clean and split input
 	squeue = bytes.TrimSpace(squeue)
 	squeue = bytes.Trim(squeue, "\n")
 	if len(squeue) == 0 {
-		// handle no jobs returned
+		// No jobs returned
 		return nil, nil
 	}
 
@@ -111,6 +143,7 @@ func (jcf *JobCliFallbackFetcher) fetch() ([]JobMetric, error) {
 		var metric struct {
 			Account   string    `json:"a"`
 			JobId     float64   `json:"id"`
+			ArrayId   string    `json:"array_id"` // Added array_id field
 			EndTime   NAbleTime `json:"end_time"`
 			JobState  string    `json:"state"`
 			Partition string    `json:"p"`
@@ -123,15 +156,26 @@ func (jcf *JobCliFallbackFetcher) fetch() ([]JobMetric, error) {
 			jcf.errCounter.Inc()
 			continue
 		}
+
+		// Skip duplicate JobIds
+		if seenJobs[metric.JobId] {
+			continue
+		}
+		seenJobs[metric.JobId] = true
+
+		// Convert memory to float
 		mem, err := MemToFloat(metric.Mem)
 		if err != nil {
 			slog.Error(fmt.Sprintf("squeue fallback parse error: failed on line %d `%s` with err `%q`", i, line, err))
 			jcf.errCounter.Inc()
 			continue
 		}
+
+		// Create JobMetric object
 		openapiJobMetric := JobMetric{
 			Account:   metric.Account,
 			JobId:     metric.JobId,
+			ArrayId:   metric.ArrayId,
 			JobState:  metric.JobState,
 			Partition: metric.Partition,
 			UserName:  metric.UserName,
@@ -158,178 +202,22 @@ func (jcf *JobCliFallbackFetcher) ScrapeError() prometheus.Counter {
 	return jcf.errCounter
 }
 
-func totalAllocMem(resource *JobResource) float64 {
-	var allocMem float64
-	for _, node := range resource.AllocNodes {
-		allocMem += node.Mem
-	}
-	return allocMem
-}
-
-type NAbleTime struct{ time.Time }
-
-// report beginning of time in the case of N/A
-func (nat *NAbleTime) UnmarshalJSON(data []byte) error {
-	var tString string
-	if err := json.Unmarshal(data, &tString); err != nil {
-		return err
-	}
-	nullSet := map[string]struct{}{"N/A": {}, "NONE": {}}
-	if _, ok := nullSet[tString]; ok {
-		nat.Time = time.Time{}
-		return nil
-	}
-	t, err := time.Parse("2006-01-02T15:04:05", tString)
-	nat.Time = t
-	return err
-}
-
-type UserJobMetric struct {
-	stateJobCount map[string]float64
-	totalJobCount float64
-	allocMemory   map[string]float64
-	allocCpu      map[string]float64
-}
-
-func parseUserJobMetrics(jobMetrics []JobMetric) map[string]*UserJobMetric {
-	userMetricMap := make(map[string]*UserJobMetric)
-	for _, jobMetric := range jobMetrics {
-		metric, ok := userMetricMap[jobMetric.UserName]
-		if !ok {
-			metric = &UserJobMetric{
-				stateJobCount: make(map[string]float64),
-				allocMemory:   make(map[string]float64),
-				allocCpu:      make(map[string]float64),
-			}
-		}
-		metric.stateJobCount[jobMetric.JobState]++
-		metric.totalJobCount++
-		metric.allocMemory[jobMetric.JobState] += totalAllocMem(&jobMetric.JobResources)
-		metric.allocCpu[jobMetric.JobState] += jobMetric.JobResources.AllocCpus
-		userMetricMap[jobMetric.UserName] = metric
-	}
-	return userMetricMap
-}
-
-type AccountMetric struct {
-	stateAllocMem map[string]float64
-	stateAllocCpu map[string]float64
-	stateJobCount map[string]float64
-}
-
-func parseAccountMetrics(jobs []JobMetric) map[string]*AccountMetric {
-	accountMap := make(map[string]*AccountMetric)
-	for _, job := range jobs {
-		metric, ok := accountMap[job.Account]
-		if !ok {
-			metric = &AccountMetric{
-				stateJobCount: make(map[string]float64),
-				stateAllocMem: make(map[string]float64),
-				stateAllocCpu: make(map[string]float64),
-			}
-			accountMap[job.Account] = metric
-		}
-		metric.stateAllocCpu[job.JobState] += job.JobResources.AllocCpus
-		metric.stateAllocMem[job.JobState] += totalAllocMem(&job.JobResources)
-		metric.stateJobCount[job.JobState]++
-	}
-	return accountMap
-}
-
-type PartitionJobMetric struct {
-	partitionState map[string]float64
-}
-
-func parsePartitionJobMetrics(jobs []JobMetric) map[string]*PartitionJobMetric {
-	partitionMetric := make(map[string]*PartitionJobMetric)
-	for _, job := range jobs {
-		metric, ok := partitionMetric[job.Partition]
-		if !ok {
-			metric = &PartitionJobMetric{
-				partitionState: make(map[string]float64),
-			}
-			partitionMetric[job.Partition] = metric
-		}
-		metric.partitionState[job.JobState]++
-	}
-	return partitionMetric
-}
-
-type FeatureJobMetric struct {
-	allocMem float64
-	allocCpu float64
-	total    float64
-}
-
-func parseFeatureMetric(jobs []JobMetric) map[string]*FeatureJobMetric {
-	featureMap := make(map[string]*FeatureJobMetric)
-	for _, job := range jobs {
-		for _, feature := range strings.Split(job.Features, "&") {
-			metric, ok := featureMap[feature]
-			if !ok {
-				metric = new(FeatureJobMetric)
-				featureMap[feature] = metric
-			}
-			metric.allocCpu += job.JobResources.AllocCpus
-			metric.allocMem += totalAllocMem(&job.JobResources)
-			metric.total++
-		}
-	}
-	return featureMap
-}
-
 type JobsCollector struct {
-	// collector state
-	fetcher      SlurmMetricFetcher[JobMetric]
-	fallback     bool
-	jobAllocCpus *prometheus.Desc
-	jobAllocMem  *prometheus.Desc
-	// user metrics
-	userJobStateTotal *prometheus.Desc
-	userJobMemAlloc   *prometheus.Desc
-	userJobCpuAlloc   *prometheus.Desc
-	// partition
-	partitionJobStateTotal *prometheus.Desc
-	// account metrics
-	accountJobStateMemAlloc *prometheus.Desc
-	accountJobStateCpuAlloc *prometheus.Desc
-	accountJobStateTotal    *prometheus.Desc
-	// feature metrics
-	featureJobMemAlloc *prometheus.Desc
-	featureJobCpuAlloc *prometheus.Desc
-	featureJobTotal    *prometheus.Desc
-	// exporter metrics
+	fetcher           SlurmMetricFetcher[JobMetric]
+	fallback          bool
+	jobStatus         *prometheus.Desc
 	jobScrapeDuration *prometheus.Desc
 	jobScrapeError    prometheus.Counter
-	// Job States metrics
-	jobStatus *prometheus.Desc
-}
-
-func (jc *JobsCollector) SetFetcher(fetcher SlurmMetricFetcher[JobMetric]) {
-	jc.fetcher = fetcher
 }
 
 func NewJobsController(config *Config) *JobsCollector {
 	cliOpts := config.cliOpts
 	fetcher := config.TraceConf.sharedFetcher
 	return &JobsCollector{
-		fetcher:  fetcher,
-		fallback: cliOpts.fallback,
-		// individual job metrics
-		jobAllocCpus:            prometheus.NewDesc("slurm_job_alloc_cpus", "amount of cpus allocated per job", []string{"jobid"}, nil),
-		jobAllocMem:             prometheus.NewDesc("slurm_job_alloc_mem", "amount of mem allocated per job", []string{"jobid"}, nil),
-		userJobStateTotal:       prometheus.NewDesc("slurm_user_state_total", "total jobs per state per user", []string{"username", "state"}, nil),
-		userJobMemAlloc:         prometheus.NewDesc("slurm_user_mem_alloc", "total mem alloc per user", []string{"username", "state"}, nil),
-		userJobCpuAlloc:         prometheus.NewDesc("slurm_user_cpu_alloc", "total cpu alloc per user", []string{"username", "state"}, nil),
-		partitionJobStateTotal:  prometheus.NewDesc("slurm_partition_job_state_total", "total jobs per partition per state", []string{"partition", "state"}, nil),
-		accountJobStateMemAlloc: prometheus.NewDesc("slurm_account_job_state_mem_alloc", "alloc mem consumed per account per job state", []string{"account", "state"}, nil),
-		accountJobStateCpuAlloc: prometheus.NewDesc("slurm_account_job_state_cpu_alloc", "alloc cpu consumed per account per job state", []string{"account", "state"}, nil),
-		accountJobStateTotal:    prometheus.NewDesc("slurm_account_job_state_total", "total jobs per account per job state", []string{"account", "state"}, nil),
-		featureJobMemAlloc:      prometheus.NewDesc("slurm_feature_mem_alloc", "alloc mem consumed per feature", []string{"feature"}, nil),
-		featureJobCpuAlloc:      prometheus.NewDesc("slurm_feature_cpu_alloc", "alloc cpu consumed per feature", []string{"feature"}, nil),
-		featureJobTotal:         prometheus.NewDesc("slurm_feature_total", "alloc cpu consumed per feature", []string{"feature"}, nil),
-		jobScrapeDuration:       prometheus.NewDesc("slurm_job_scrape_duration", fmt.Sprintf("how long the cmd %v took (ms)", cliOpts.squeue), nil, nil),
-		jobStatus:                prometheus.NewDesc("slurm_job_status", "Job status with ID and name", []string{"job_id", "job_name", "state"}, nil),
+		fetcher:           fetcher,
+		fallback:          cliOpts.fallback,
+		jobStatus:         prometheus.NewDesc("slurm_job_status", "Job status with ID, name, and array_id", []string{"job_id", "job_name", "state", "array_id"}, nil), // Added array_id as label
+		jobScrapeDuration: prometheus.NewDesc("slurm_job_scrape_duration", fmt.Sprintf("how long the cmd %v took (ms)", cliOpts.squeue), nil, nil),
 		jobScrapeError: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "slurm_job_scrape_error",
 			Help: "slurm job scrape error",
@@ -338,18 +226,6 @@ func NewJobsController(config *Config) *JobsCollector {
 }
 
 func (jc *JobsCollector) Describe(ch chan<- *prometheus.Desc) {
-	ch <- jc.jobAllocCpus
-	ch <- jc.jobAllocMem
-	ch <- jc.userJobStateTotal
-	ch <- jc.userJobMemAlloc
-	ch <- jc.userJobCpuAlloc
-	ch <- jc.partitionJobStateTotal
-	ch <- jc.accountJobStateMemAlloc
-	ch <- jc.accountJobStateCpuAlloc
-	ch <- jc.accountJobStateTotal
-	ch <- jc.featureJobMemAlloc
-	ch <- jc.featureJobCpuAlloc
-	ch <- jc.featureJobTotal
 	ch <- jc.jobStatus
 	ch <- jc.jobScrapeDuration
 	ch <- jc.jobScrapeError.Desc()
@@ -357,7 +233,7 @@ func (jc *JobsCollector) Describe(ch chan<- *prometheus.Desc) {
 
 func (jc *JobsCollector) Collect(ch chan<- prometheus.Metric) {
 	defer func() {
-		ch <- jc.fetcher.ScrapeError()
+		ch <- jc.jobScrapeError
 	}()
 	jobMetrics, err := jc.fetcher.FetchMetrics()
 	ch <- prometheus.MustNewConstMetric(jc.jobScrapeDuration, prometheus.GaugeValue, float64(jc.fetcher.ScrapeDuration().Milliseconds()))
@@ -365,69 +241,18 @@ func (jc *JobsCollector) Collect(ch chan<- prometheus.Metric) {
 		slog.Error("fetcher failure %q", err)
 		return
 	}
-	userMetrics := parseUserJobMetrics(jobMetrics)
-	for user, metric := range userMetrics {
-		for state, allocCpu := range metric.allocCpu {
-			if allocCpu > 0 {
-				ch <- prometheus.MustNewConstMetric(jc.userJobCpuAlloc, prometheus.GaugeValue, allocCpu, user, state)
-			}
-		}
-		for state, allocMem := range metric.allocMemory {
-			if allocMem > 0 {
-				ch <- prometheus.MustNewConstMetric(jc.userJobMemAlloc, prometheus.GaugeValue, allocMem, user, state)
-			}
-		}
-		for state, count := range metric.stateJobCount {
-			if count > 0 {
-				ch <- prometheus.MustNewConstMetric(jc.userJobStateTotal, prometheus.GaugeValue, count, user, state)
-			}
-		}
-	}
-
-	emitNonZeroStateConstGuage := func(desc *prometheus.Desc, metricMap map[string]float64, account string) {
-		for state, val := range metricMap {
-			if val > 0 {
-				ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, val, account, state)
-			}
-		}
-	}
-
-	accountMetrics := parseAccountMetrics(jobMetrics)
-	for account, metric := range accountMetrics {
-		emitNonZeroStateConstGuage(jc.accountJobStateCpuAlloc, metric.stateAllocCpu, account)
-		emitNonZeroStateConstGuage(jc.accountJobStateMemAlloc, metric.stateAllocMem, account)
-		emitNonZeroStateConstGuage(jc.accountJobStateTotal, metric.stateJobCount, account)
-	}
-
-	partitionJobMetrics := parsePartitionJobMetrics(jobMetrics)
-	for partition, stateTotals := range partitionJobMetrics {
-		for state, totalJobs := range stateTotals.partitionState {
-			ch <- prometheus.MustNewConstMetric(jc.partitionJobStateTotal, prometheus.GaugeValue, totalJobs, partition, state)
-		}
-	}
-
-	featureJobMetric := parseFeatureMetric(jobMetrics)
-	for feature, metric := range featureJobMetric {
-		if metric.allocCpu > 0 {
-			ch <- prometheus.MustNewConstMetric(jc.featureJobCpuAlloc, prometheus.GaugeValue, metric.allocCpu, feature)
-		}
-		if metric.allocMem > 0 {
-			ch <- prometheus.MustNewConstMetric(jc.featureJobMemAlloc, prometheus.GaugeValue, metric.allocMem, feature)
-		}
-		if metric.total > 0 {
-			ch <- prometheus.MustNewConstMetric(jc.featureJobTotal, prometheus.GaugeValue, metric.total, feature)
-		}
-	}
 
 	for _, job := range jobMetrics {
-		// Отправляем метрику для каждого Job'а
+		// Send metrics for each job with array_id
 		ch <- prometheus.MustNewConstMetric(
 			jc.jobStatus,
 			prometheus.GaugeValue,
-			1,                          // Значение фиксированное (просто наличие Job'а)
-			fmt.Sprintf("%.0f", job.JobId),  // Преобразуем JobId в строку
-			job.UserName,                // Имя Job'а (используем UserName в качестве имени Job)
-			job.JobState,                // Статус Job'а
+			1,                              // Fixed value indicating job presence
+			fmt.Sprintf("%.0f", job.JobId), // Convert JobId to string
+			job.UserName,                   // User name (used as job name)
+			job.JobState,                   // Job state
+			job.ArrayId,                    // New array_id label
 		)
 	}
 }
+
