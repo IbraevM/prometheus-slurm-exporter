@@ -29,6 +29,7 @@ type NodeMetric struct {
 	Partitions  []string `json:"partitions"`
 	RealMemory  float64  `json:"real_memory"`
 	State       string   `json:"state"`
+	Reason      string   `json:"reason"`
 	Weight      float64  `json:"weight"`
 }
 
@@ -126,6 +127,7 @@ func (cmf *NodeCliFallbackFetcher) fetch() ([]NodeMetric, error) {
 			Partition  string     `json:"p"`
 			CpuLoad    NAbleFloat `json:"l"`
 			State      string     `json:"s"`
+			Reason     string     `json:"reason"`
 			Weight     float64    `json:"w"`
 		}
 		if err := json.Unmarshal(line, &metric); err != nil {
@@ -177,6 +179,7 @@ func (cmf *NodeCliFallbackFetcher) fetch() ([]NodeMetric, error) {
 				FreeMemory:  float64(metric.FreeMemory),
 				Partitions:  []string{metric.Partition},
 				State:       metric.State,
+				Reason:      metric.Reason,
 				AllocMemory: metric.RealMemory - float64(metric.FreeMemory),
 				AllocCpus:   allocated,
 				IdleCpus:    idle,
@@ -358,7 +361,7 @@ func NewNodeCollecter(config *Config) *NodesCollector {
 		nodeScrapeDuration: prometheus.NewDesc("slurm_node_scrape_duration", fmt.Sprintf("how long the cmd %v took (ms)", cliOpts.sinfo), nil, nil),
 		nodeScrapeErrors:   fetcher.ScrapeError(),
 		// Node Stats
-        	nodeStatus: prometheus.NewDesc("slurm_node_status", "Status of each node in the cluster", []string{"node", "state"}, nil),
+        	nodeStatus: prometheus.NewDesc("slurm_node_status", "Status of each node in the cluster", []string{"node", "state", "reason"}, nil),
 	}
 }
 
@@ -442,11 +445,12 @@ func (nc *NodesCollector) Collect(ch chan<- prometheus.Metric) {
 
  	   for _, node := range nodeMetrics {
         	ch <- prometheus.MustNewConstMetric(
-            	nc.nodeStatus,             // Метрика nodeStatus
-            	prometheus.GaugeValue,      // Тип метрики
-            	1,                          // Значение метрики (фиксированное)
-            	node.Hostname,              // Лейбл node (имя ноды)
-            	node.State,                 // Лейбл state (статус ноды)
+            	nc.nodeStatus,             // Metrics nodeStatus
+            	prometheus.GaugeValue,      // Type
+            	1,                          // Value (fixed)
+            	node.Hostname,              // Label node (node name)
+            	node.State,                 // Label state (node status)
+		node.Reason,       // Label reason (reason of the state)
         	)
     	}
 }
